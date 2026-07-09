@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+
+# Virtual environment
+venv/
+.venv/
+
+# Data & outputs (sinh ra khi chạy, không nên commit)
+data/
+data_clean/
+eda_output/
+models_saved/
+predictions_cache/
+
+# Jupyter
+.ipynb_checkpoints/
