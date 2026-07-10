@@ -31,5 +31,5 @@ lstm_results_df = run_lstm_experiment(
     os.path.join(EDA_DIR, "lstm_results.csv"),
     model_dir=LSTM_MODEL_DIR,
     predictions_dir=LSTM_PRED_DIR,
-    use_cache=True,
+    use_cache=False,
 )
