@@ -139,7 +139,7 @@ def run_lstm_experiment(
         num_layers=2,
         dropout=0.2,
         learning_rate=1e-3,
-        epochs=20,
+        epochs=50,
         batch_size=64,
 ):
     os.makedirs(plot_dir, exist_ok=True)
@@ -229,7 +229,7 @@ def run_lstm_experiment(
                 save_path=os.path.join(plot_dir, f"{tag}_trajectory.png"),
             )
 
- 
+
     results_df = pd.DataFrame(results)[["ship", "horizon", "MAE", "RMSE", "R2"]]
     results_df.to_csv(results_csv_path, index=False)
 

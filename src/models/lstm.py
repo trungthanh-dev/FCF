@@ -1,9 +1,11 @@
 import os
 import sys
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
+from sklearn.preprocessing import StandardScaler
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import RANDOM_STATE
@@ -51,6 +53,19 @@ class LSTMModel:
         torch.manual_seed(RANDOM_STATE)
 
         self.model = None
+        self.scaler = StandardScaler()
+
+    def _scale_fit(self, X):
+        # X: (samples, window, features) -> fit trên toàn bộ điểm dữ liệu train
+        n_samples, w, f = X.shape
+        X_2d = X.reshape(-1, f)
+        self.scaler.fit(X_2d)
+        return self.scaler.transform(X_2d).reshape(n_samples, w, f)
+
+    def _scale_transform(self, X):
+        n_samples, w, f = X.shape
+        X_2d = X.reshape(-1, f)
+        return self.scaler.transform(X_2d).reshape(n_samples, w, f)
 
     def _build_model(self, input_size):
         self.model = _LSTMNet(
@@ -60,12 +75,24 @@ class LSTMModel:
             dropout=self.dropout,
         ).to(self.device)
 
-    def train(self, X_train, y_train, verbose=True):
+    def train(self, X_train, y_train, verbose=True, val_ratio=0.1, patience=5):
         if self.model is None:
             self._build_model(input_size=X_train.shape[2])
 
-        X_tensor = torch.tensor(X_train, dtype=torch.float32)
-        y_tensor = torch.tensor(y_train, dtype=torch.float32)
+        # Tách validation từ 10% CUỐI của train (giữ nguyên thứ tự thời gian,
+        # không shuffle trước khi tách) -- để có tín hiệu dừng sớm, tránh
+        # overfit như trường hợp Triton (train loss giảm đều nhưng test R2 âm).
+        n_val = int(len(X_train) * val_ratio)
+        X_tr, X_val = X_train[:-n_val], X_train[-n_val:]
+        y_tr, y_val = y_train[:-n_val], y_train[-n_val:]
+
+        X_tr_scaled = self._scale_fit(X_tr)      # fit scaler CHỈ trên phần train thật
+        X_val_scaled = self._scale_transform(X_val)
+
+        X_tensor = torch.tensor(X_tr_scaled, dtype=torch.float32)
+        y_tensor = torch.tensor(y_tr, dtype=torch.float32)
+        X_val_tensor = torch.tensor(X_val_scaled, dtype=torch.float32).to(self.device)
+        y_val_tensor = torch.tensor(y_val, dtype=torch.float32).to(self.device)
 
         dataset = TensorDataset(X_tensor, y_tensor)
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
@@ -73,8 +100,12 @@ class LSTMModel:
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
 
-        self.model.train()
+        best_val_loss = float("inf")
+        best_state = None
+        epochs_no_improve = 0
+
         for epoch in range(self.epochs):
+            self.model.train()
             total_loss = 0.0
             for X_batch, y_batch in loader:
                 X_batch = X_batch.to(self.device)
@@ -88,13 +119,38 @@ class LSTMModel:
 
                 total_loss += loss.item() * X_batch.size(0)
 
-            epoch_loss = total_loss / len(dataset)
+            train_loss = total_loss / len(dataset)
+
+            # --- validation loss, để biết có đang overfit không ---
+            self.model.eval()
+            with torch.no_grad():
+                val_pred = self.model(X_val_tensor)
+                val_loss = criterion(val_pred, y_val_tensor).item()
+
             if verbose:
-                print(f"Epoch {epoch + 1}/{self.epochs} - loss: {epoch_loss:.6f}")
+                print(f"Epoch {epoch + 1}/{self.epochs} - "
+                      f"train_loss: {train_loss:.6f}  val_loss: {val_loss:.6f}")
+
+            # --- early stopping ---
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+                if epochs_no_improve >= patience:
+                    if verbose:
+                        print(f"Early stopping at epoch {epoch + 1} "
+                              f"(no val improvement for {patience} epochs)")
+                    break
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state)  # khôi phục weight tốt nhất, không phải weight cuối cùng
 
     def predict(self, X_test):
         self.model.eval()
-        X_tensor = torch.tensor(X_test, dtype=torch.float32).to(self.device)
+        X_test_scaled = self._scale_transform(X_test)  # dùng scaler đã fit từ train
+        X_tensor = torch.tensor(X_test_scaled, dtype=torch.float32).to(self.device)
 
         with torch.no_grad():
             y_pred = self.model(X_tensor)
