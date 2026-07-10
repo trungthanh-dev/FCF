@@ -4,7 +4,6 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
-from tensorflow.python.layers.core import dropout
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 
@@ -35,9 +34,8 @@ class _LSTMNet(nn.Module):
             nn.Linear(hidden_size, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(64,1)
+            nn.Linear(64, 1)
         )
-
 
     def forward(self, x):
         out, _ = self.lstm(x)
@@ -139,9 +137,9 @@ class LSTMModel:
                 y_pred = self.model(X_batch)
                 loss = criterion(y_pred, y_batch)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm(
+                torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
-                    max_norm = 1.0
+                    max_norm=1.0
                 )
                 optimizer.step()
 

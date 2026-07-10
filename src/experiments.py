@@ -140,8 +140,43 @@ def run_lstm_experiment(
         dropout=0.1,
         learning_rate=5e-4,
         epochs=150,
-        batch_size=64,
+        batch_size=128,
 ):
+    """
+    Train, evaluate, and plot an LSTM model for every (ship, horizon)
+    combination. Mirrors run_random_forest_experiment(): same caching
+    pattern (model + predictions saved to disk, reloaded on later runs),
+    same plot set — except feature importance, which Random Forest
+    exposes natively but LSTM does not.
+
+    LSTM consumes the sliding-window input directly as a 3D tensor
+    (samples, window_size, features); no flattening step is needed
+    (handled internally by LSTMModel).
+
+    Unlike Random Forest — whose tree-based splits are invariant to
+    feature scale — LSTM is trained via gradient descent through
+    sigmoid/tanh activations and is highly sensitive to input scale.
+    Feature scaling, a chronological validation split for early
+    stopping, and gradient clipping are all handled internally by
+    LSTMModel.train()/predict() (see models/lstm.py), so raw windowed
+    data is passed here unmodified.
+
+    Parameters
+    ----------
+    cleaned_datasets, window_size, forecast_horizons, plot_dir,
+    results_csv_path, model_dir, predictions_dir, use_cache :
+        Same meaning as in run_random_forest_experiment(). use_cache
+        defaults to False here since LSTM training configuration
+        (architecture, scaler, early stopping) changes more often
+        during experimentation than the RF baseline.
+    hidden_size, num_layers, dropout, learning_rate, epochs, batch_size :
+        Forwarded to LSTMModel(...) for every combination.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ship, horizon, MAE, RMSE, R2 — one row per combination.
+    """
     os.makedirs(plot_dir, exist_ok=True)
     if model_dir:
         os.makedirs(model_dir, exist_ok=True)
@@ -159,14 +194,15 @@ def run_lstm_experiment(
             model_path = os.path.join(model_dir, f"{tag}.pt") if model_dir else None
             pred_path = os.path.join(predictions_dir, f"{tag}.npz") if predictions_dir else None
             cache_available = (
-                use_cache
-                and model_path and pred_path
-                and os.path.exists(model_path)
-                and os.path.exists(pred_path)
+                    use_cache
+                    and model_path and pred_path
+                    and os.path.exists(model_path)
+                    and os.path.exists(pred_path)
             )
 
             if cache_available:
-                print(f"\n[LSTM] {name} | Horizon = {horizon} - loaded from cache, skipping training")
+                print(f"\n[LSTM] {name} | Horizon = {horizon} — loaded from cache, skipping training")
+
                 lstm = LSTMModel(
                     hidden_size=hidden_size,
                     num_layers=num_layers,
@@ -181,8 +217,12 @@ def run_lstm_experiment(
                 y_test, y_pred = cached["y_test"], cached["y_pred"]
 
             else:
-                X_window, y_window = create_sliding_window(X, y, window_size, horizon)
-                X_train, X_test, y_train, y_test = time_series_split(X_window, y_window)
+                X_window, y_window = create_sliding_window(
+                    X, y, window_size, horizon
+                )
+                X_train, X_test, y_train, y_test = time_series_split(
+                    X_window, y_window
+                )
 
                 print(f"\n[LSTM] {name} | Horizon = {horizon}")
                 print("X_train:", X_train.shape)
@@ -228,7 +268,6 @@ def run_lstm_experiment(
                 title=f"[LSTM] Fuel Consumption Trajectory: Actual vs. Predicted — {name}, horizon={horizon}",
                 save_path=os.path.join(plot_dir, f"{tag}_trajectory.png"),
             )
-
 
     results_df = pd.DataFrame(results)[["ship", "horizon", "MAE", "RMSE", "R2"]]
     results_df.to_csv(results_csv_path, index=False)
