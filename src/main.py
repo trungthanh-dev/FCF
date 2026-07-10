@@ -6,7 +6,7 @@ from feature_config import print_feature_summary
 from preprocessing import preprocess
 from dataset import split_features_target, time_series_split
 from window import *
-from experiments import run_random_forest_experiment
+from experiments import run_random_forest_experiment, run_lstm_experiment
 from config import (
     WINDOW_SIZE,
     FORECAST_HORIZONS,
@@ -19,9 +19,13 @@ DATA_DIR = "data_clean"
 RF_PLOT_DIR = os.path.join(EDA_DIR, "rf_plots")
 RF_MODEL_DIR = os.path.join("models_saved", "random_forest")
 RF_PRED_DIR = os.path.join("predictions_cache", "random_forst")
+LSTM_PLOT_DIR = os.path.join(EDA_DIR, "lstm_plots")
+LSTM_MODEL_DIR = os.path.join("models_saved", "lstm")
+LSTM_PRED_DIR = os.path.join("predictions_cache", "lstm")
 os.makedirs(EDA_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(RF_PLOT_DIR, exist_ok=True)
+os.makedirs(LSTM_PLOT_DIR, exist_ok=True)
 
 LOG_FILE = os.path.join(EDA_DIR, "eda_report.txt")
 if os.path.exists(LOG_FILE):
@@ -61,7 +65,7 @@ for name, df_clean in cleaned_datasets.items():
     print(f"Save")
 print("Done")
 
-results_df = run_random_forest_experiment(
+rd_results_df = run_random_forest_experiment(
     cleaned_datasets,
     WINDOW_SIZE,
     FORECAST_HORIZONS,
@@ -69,5 +73,16 @@ results_df = run_random_forest_experiment(
     os.path.join(EDA_DIR, "rf_results.csv"),
     model_dir=RF_PLOT_DIR,
     predictions_dir=RF_PRED_DIR,
+    use_cache = True,
+)
+
+lstm_results_df = run_lstm_experiment(
+    cleaned_datasets,
+    WINDOW_SIZE,
+    FORECAST_HORIZONS,
+    LSTM_PLOT_DIR,
+    os.path.join(EDA_DIR, "lstm_results.csv"),
+    model_dir=LSTM_MODEL_DIR,
+    predictions_dir=LSTM_PRED_DIR,
     use_cache = True,
 )
