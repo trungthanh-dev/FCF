@@ -1,11 +1,15 @@
 import torch
 import torch.nn as nn
+import os
+import sys
 from torch.nn.functional import dropout
 from torch.utils.checkpoint import checkpoint
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from torch.utils.data import TensorDataset, DataLoader
 
-from src.config import RANDOM_STATE
+from config import RANDOM_STATE
 
 class _LSTMNet(nn.Module):
     def __int__(self, input_size, hidden_size, num_layers, dropout):
@@ -120,7 +124,7 @@ class LSTMModel:
     ):
         torch.save(
             {
-                "State_dict": self.model.state_dict()
+                "State_dict": self.model.state_dict(),
                 "hidden_state": self.hidden_size,
                 "num_layers": self.num_layers,
                 "dropout": self.dropout,
@@ -134,6 +138,7 @@ class LSTMModel:
             path,
     ):
         checkpoint= torch.load(path, map_location= self.device)
+
         self.hidden_size = checkpoint["hidden_size"]
         self.num_layers = checkpoint["num_layers"]
         self.dropout = checkpoint["dropout"]
