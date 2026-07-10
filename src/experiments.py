@@ -135,11 +135,11 @@ def run_lstm_experiment(
         model_dir=None,
         predictions_dir=None,
         use_cache=True,
-        hidden_size=64,
+        hidden_size=128,
         num_layers=2,
-        dropout=0.2,
-        learning_rate=1e-3,
-        epochs=50,
+        dropout=0.1,
+        learning_rate=5e-4,
+        epochs=150,
         batch_size=64,
 ):
     os.makedirs(plot_dir, exist_ok=True)

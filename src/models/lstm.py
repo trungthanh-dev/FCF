@@ -1,9 +1,10 @@
 import os
 import sys
-
+import random
 import numpy as np
 import torch
 import torch.nn as nn
+from tensorflow.python.layers.core import dropout
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 
@@ -12,7 +13,12 @@ from config import RANDOM_STATE
 
 
 class _LSTMNet(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, dropout):
+    def __init__(
+            self,
+            input_size,
+            hidden_size,
+            num_layers,
+            dropout):
         super().__init__()
         self.input_size = input_size
 
@@ -22,24 +28,33 @@ class _LSTMNet(nn.Module):
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0.0,
+
         )
-        self.fc = nn.Linear(hidden_size, 1)
+        self.dropout_layer = nn.Dropout(dropout)
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_size, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64,1)
+        )
+
 
     def forward(self, x):
         out, _ = self.lstm(x)
         last_hidden = out[:, -1, :]
+        last_hidden = self.dropout_layer(last_hidden)
         return self.fc(last_hidden).squeeze(-1)
 
 
 class LSTMModel:
     def __init__(
             self,
-            hidden_size=64,
+            hidden_size=128,
             num_layers=2,
-            dropout=0.2,
-            learning_rate=1e-3,
-            epochs=20,
-            batch_size=64,
+            dropout=0.1,
+            learning_rate=5e-4,
+            epochs=150,
+            batch_size=128,
             device=None,
     ):
         self.hidden_size = hidden_size
@@ -50,8 +65,12 @@ class LSTMModel:
         self.batch_size = batch_size
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        random.seed(RANDOM_STATE)
+        np.random.seed(RANDOM_STATE)
         torch.manual_seed(RANDOM_STATE)
-
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(RANDOM_STATE)
+            torch.cuda.manual_seed_all(RANDOM_STATE)
         self.model = None
         self.scaler = StandardScaler()
 
@@ -75,7 +94,7 @@ class LSTMModel:
             dropout=self.dropout,
         ).to(self.device)
 
-    def train(self, X_train, y_train, verbose=True, val_ratio=0.1, patience=5):
+    def train(self, X_train, y_train, verbose=True, val_ratio=0.1, patience=10):
         if self.model is None:
             self._build_model(input_size=X_train.shape[2])
 
@@ -98,8 +117,13 @@ class LSTMModel:
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
         criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
-
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-5)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.5,
+            patience=3,
+        )
         best_val_loss = float("inf")
         best_state = None
         epochs_no_improve = 0
@@ -115,6 +139,10 @@ class LSTMModel:
                 y_pred = self.model(X_batch)
                 loss = criterion(y_pred, y_batch)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm(
+                    self.model.parameters(),
+                    max_norm = 1.0
+                )
                 optimizer.step()
 
                 total_loss += loss.item() * X_batch.size(0)
@@ -126,7 +154,7 @@ class LSTMModel:
             with torch.no_grad():
                 val_pred = self.model(X_val_tensor)
                 val_loss = criterion(val_pred, y_val_tensor).item()
-
+            scheduler.step(val_loss)
             if verbose:
                 print(f"Epoch {epoch + 1}/{self.epochs} - "
                       f"train_loss: {train_loss:.6f}  val_loss: {val_loss:.6f}")
@@ -165,6 +193,7 @@ class LSTMModel:
                 "num_layers": self.num_layers,
                 "dropout": self.dropout,
                 "input_size": self.model.input_size,
+                "scaler": self.scaler,
             },
             path,
         )
@@ -175,6 +204,6 @@ class LSTMModel:
         self.hidden_size = checkpoint["hidden_size"]
         self.num_layers = checkpoint["num_layers"]
         self.dropout = checkpoint["dropout"]
-
+        self.scaler = checkpoint["scaler"]
         self._build_model(input_size=checkpoint["input_size"])
         self.model.load_state_dict(checkpoint["state_dict"])
