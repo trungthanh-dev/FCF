@@ -134,7 +134,7 @@ def run_lstm_experiment(
         results_csv_path,
         model_dir=None,
         predictions_dir=None,
-        use_cache=True,
+        use_cache=False,
         hidden_size=128,
         num_layers=2,
         dropout=0.1,
