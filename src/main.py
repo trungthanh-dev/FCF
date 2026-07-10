@@ -76,13 +76,3 @@ rd_results_df = run_random_forest_experiment(
     use_cache = True,
 )
 
-lstm_results_df = run_lstm_experiment(
-    cleaned_datasets,
-    WINDOW_SIZE,
-    FORECAST_HORIZONS,
-    LSTM_PLOT_DIR,
-    os.path.join(EDA_DIR, "lstm_results.csv"),
-    model_dir=LSTM_MODEL_DIR,
-    predictions_dir=LSTM_PRED_DIR,
-    use_cache = True,
-)
