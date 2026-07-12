@@ -55,6 +55,7 @@ class LSTMModel:
             batch_size=128,
             val_ratio=0.1,
             patience=10,
+            loss_delta=1.0,
             device=None,
     ):
         self.hidden_size = hidden_size
@@ -63,6 +64,14 @@ class LSTMModel:
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.batch_size = batch_size
+        # FIX: delta for Huber loss (nn.HuberLoss). Ships like Ceto have
+        # occasional high-fuel-consumption spikes (positively skewed
+        # target) — under MSE, those few outlier samples produce very
+        # large gradients that can drag training off track. Huber loss
+        # behaves like MSE for small errors (|e| <= delta) but switches to
+        # a linear (MAE-like) penalty for large errors, capping the
+        # influence of outliers while keeping smooth gradients near zero.
+        self.loss_delta = loss_delta
         # FIX: val_ratio/patience are now configurable per model instance
         # (previously hardcoded as train() defaults, so every ship was
         # forced to use the same early-stopping behavior regardless of
@@ -161,7 +170,7 @@ class LSTMModel:
         dataset = TensorDataset(X_tensor, y_tensor)
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
-        criterion = nn.MSELoss()
+        criterion = nn.HuberLoss(delta=self.loss_delta)
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-5)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
