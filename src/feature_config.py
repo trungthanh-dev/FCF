@@ -18,6 +18,20 @@ DROP_FEATURES = [
 ]
 NON_FEATURE_COLUMNS = ["ship", "index"]
 
+# Lag / rolling-window features built from the target itself, added by
+# preprocessing.add_target_history_features(). Both use ONLY past values
+# (shift() is applied before rolling()), so they never leak the current
+# or future timestep — same "no information from prediction time" rule
+# followed by the leakage-removal step and the sliding-window construction.
+#
+# Why: ships like Triton have no single feature strongly correlated with
+# the target (importance spreads across ~20 weak features instead of one
+# dominant signal like Poseidon's Ship_SpeedThroughWater). A lagged/
+# rolling version of the target itself gives the model a direct anchor to
+# recent fuel consumption, which plain sensor features don't provide.
+TARGET_LAG_STEPS = (1, 5)
+TARGET_ROLLING_WINDOWS = (5,)
+
 def detect_leakage_features(df):
     leakage = []
     for col in df.columns:
