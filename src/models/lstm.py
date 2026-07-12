@@ -71,6 +71,15 @@ class LSTMModel:
             torch.cuda.manual_seed_all(RANDOM_STATE)
         self.model = None
         self.scaler = StandardScaler()
+        # FIX: added a separate scaler for the target. Previously X was
+        # scaled but y was left in raw units. For ships like Triton/Ceto,
+        # where fuel values sit in a small range (~0.02-0.35), MSE loss on
+        # unscaled y produces very small gradients, which combined with a
+        # conservative learning_rate (5e-4) and early stopping (patience=10)
+        # can cause training to stop before the model has learned anything
+        # beyond predicting close to the mean — consistent with the
+        # near-identical R2 seen at h=10 and h=20 for Triton.
+        self.y_scaler = StandardScaler()
 
     def _scale_fit(self, X):
         # X: (samples, window, features) -> fit trên toàn bộ điểm dữ liệu train
@@ -83,6 +92,19 @@ class LSTMModel:
         n_samples, w, f = X.shape
         X_2d = X.reshape(-1, f)
         return self.scaler.transform(X_2d).reshape(n_samples, w, f)
+
+    def _y_scale_fit(self, y):
+        y_2d = np.asarray(y).reshape(-1, 1)
+        self.y_scaler.fit(y_2d)
+        return self.y_scaler.transform(y_2d).reshape(-1)
+
+    def _y_scale_transform(self, y):
+        y_2d = np.asarray(y).reshape(-1, 1)
+        return self.y_scaler.transform(y_2d).reshape(-1)
+
+    def _y_inverse_transform(self, y_scaled):
+        y_2d = np.asarray(y_scaled).reshape(-1, 1)
+        return self.y_scaler.inverse_transform(y_2d).reshape(-1)
 
     def _build_model(self, input_size):
         self.model = _LSTMNet(
@@ -106,10 +128,17 @@ class LSTMModel:
         X_tr_scaled = self._scale_fit(X_tr)      # fit scaler CHỈ trên phần train thật
         X_val_scaled = self._scale_transform(X_val)
 
+        # FIX: fit the target scaler on y_tr only (same rule as X — never
+        # fit on validation or test data), then scale y_tr/y_val to match
+        # the scale the network trains in. Predictions are inverse-transformed
+        # back to raw fuel units in predict().
+        y_tr_scaled = self._y_scale_fit(y_tr)
+        y_val_scaled = self._y_scale_transform(y_val)
+
         X_tensor = torch.tensor(X_tr_scaled, dtype=torch.float32)
-        y_tensor = torch.tensor(y_tr, dtype=torch.float32)
+        y_tensor = torch.tensor(y_tr_scaled, dtype=torch.float32)
         X_val_tensor = torch.tensor(X_val_scaled, dtype=torch.float32).to(self.device)
-        y_val_tensor = torch.tensor(y_val, dtype=torch.float32).to(self.device)
+        y_val_tensor = torch.tensor(y_val_scaled, dtype=torch.float32).to(self.device)
 
         dataset = TensorDataset(X_tensor, y_tensor)
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
@@ -179,9 +208,15 @@ class LSTMModel:
         X_tensor = torch.tensor(X_test_scaled, dtype=torch.float32).to(self.device)
 
         with torch.no_grad():
-            y_pred = self.model(X_tensor)
+            y_pred_scaled = self.model(X_tensor)
 
-        return y_pred.cpu().numpy()
+        # FIX: model now outputs predictions in scaled (standardized) units,
+        # since it was trained on scaled y. Inverse-transform back to raw
+        # fuel units before returning, so evaluate_regression() compares
+        # like-for-like against the unscaled y_test used elsewhere in the
+        # pipeline (e.g. Random Forest results).
+        y_pred_scaled = y_pred_scaled.cpu().numpy()
+        return self._y_inverse_transform(y_pred_scaled)
 
     def save(self, path):
         torch.save(
@@ -192,6 +227,7 @@ class LSTMModel:
                 "dropout": self.dropout,
                 "input_size": self.model.input_size,
                 "scaler": self.scaler,
+                "y_scaler": self.y_scaler,   # FIX: must be saved too, or load() can't inverse-transform predictions
             },
             path,
         )
@@ -203,5 +239,6 @@ class LSTMModel:
         self.num_layers = checkpoint["num_layers"]
         self.dropout = checkpoint["dropout"]
         self.scaler = checkpoint["scaler"]
+        self.y_scaler = checkpoint["y_scaler"]   # FIX: restore target scaler alongside feature scaler
         self._build_model(input_size=checkpoint["input_size"])
         self.model.load_state_dict(checkpoint["state_dict"])

@@ -19,8 +19,13 @@ def remove_empty_columns(df):
 
 def remove_drop_features(df):
     drop_features = detect_drop_features(df)
+    print(f"Removed {len(drop_features)} non-predictive features.")
+    # FIX: was dropping the literal keyword list (DROP_FEATURES, e.g. ["FuelType"]),
+    # which never matches real column names like "Consumer_Boiler1_FuelType".
+    # errors="ignore" silently hid this, so no exception was ever raised.
+    # Now drops the actual matched column names returned by detect_drop_features().
     return df.drop(
-        columns = DROP_FEATURES,
+        columns = drop_features,
         errors = "ignore"
     )
 
@@ -38,6 +43,3 @@ def preprocess(df: pd.DataFrame):
     df = handle_missing(df)
 
     return df
-
-
-
