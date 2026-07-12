@@ -141,6 +141,9 @@ def run_lstm_experiment(
         learning_rate=5e-4,
         epochs=150,
         batch_size=128,
+        val_ratio=0.1,
+        patience=10,
+        per_ship_params=None,
 ):
     """
     Train, evaluate, and plot an LSTM model for every (ship, horizon)
@@ -169,8 +172,18 @@ def run_lstm_experiment(
         defaults to False here since LSTM training configuration
         (architecture, scaler, early stopping) changes more often
         during experimentation than the RF baseline.
-    hidden_size, num_layers, dropout, learning_rate, epochs, batch_size :
-        Forwarded to LSTMModel(...) for every combination.
+    hidden_size, num_layers, dropout, learning_rate, epochs, batch_size,
+    val_ratio, patience :
+        Default hyperparameters forwarded to LSTMModel(...) for every
+        ship/horizon combination, unless overridden per-ship below.
+    per_ship_params : dict[str, dict] or None
+        Optional per-ship hyperparameter overrides, e.g.
+        {"Triton": {"hidden_size": 32, "num_layers": 1, "patience": 20}}.
+        Only the keys you want to override need to be present; anything
+        missing falls back to the defaults above. This exists because
+        smaller/noisier datasets (Triton, Ceto) overfit much faster than
+        Poseidon and need a smaller model and/or more patience, rather
+        than forcing every ship through identical hyperparameters.
 
     Returns
     -------
@@ -183,10 +196,26 @@ def run_lstm_experiment(
     if predictions_dir:
         os.makedirs(predictions_dir, exist_ok=True)
 
+    per_ship_params = per_ship_params or {}
+    base_params = dict(
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        dropout=dropout,
+        learning_rate=learning_rate,
+        epochs=epochs,
+        batch_size=batch_size,
+        val_ratio=val_ratio,
+        patience=patience,
+    )
+
     results = []
 
     for name, df in cleaned_datasets.items():
         X, y = split_features_target(df)
+
+        # Merge base defaults with any per-ship overrides for this ship.
+        ship_params = {**base_params, **per_ship_params.get(name, {})}
+        print(f"\n[LSTM] {name} — hyperparameters: {ship_params}")
 
         for horizon in forecast_horizons:
             tag = f"{name}_h{horizon}"
@@ -203,14 +232,7 @@ def run_lstm_experiment(
             if cache_available:
                 print(f"\n[LSTM] {name} | Horizon = {horizon} — loaded from cache, skipping training")
 
-                lstm = LSTMModel(
-                    hidden_size=hidden_size,
-                    num_layers=num_layers,
-                    dropout=dropout,
-                    learning_rate=learning_rate,
-                    epochs=epochs,
-                    batch_size=batch_size,
-                )
+                lstm = LSTMModel(**ship_params)
                 lstm.load(model_path)
 
                 cached = np.load(pred_path)
@@ -230,14 +252,7 @@ def run_lstm_experiment(
                 print("y_train:", y_train.shape)
                 print("y_test:", y_test.shape)
 
-                lstm = LSTMModel(
-                    hidden_size=hidden_size,
-                    num_layers=num_layers,
-                    dropout=dropout,
-                    learning_rate=learning_rate,
-                    epochs=epochs,
-                    batch_size=batch_size,
-                )
+                lstm = LSTMModel(**ship_params)
                 lstm.train(X_train, y_train)
                 y_pred = lstm.predict(X_test)
 

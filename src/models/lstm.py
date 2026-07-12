@@ -53,6 +53,8 @@ class LSTMModel:
             learning_rate=5e-4,
             epochs=150,
             batch_size=128,
+            val_ratio=0.1,
+            patience=10,
             device=None,
     ):
         self.hidden_size = hidden_size
@@ -61,6 +63,13 @@ class LSTMModel:
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.batch_size = batch_size
+        # FIX: val_ratio/patience are now configurable per model instance
+        # (previously hardcoded as train() defaults, so every ship was
+        # forced to use the same early-stopping behavior regardless of
+        # dataset size — Triton/Ceto are much smaller than Poseidon and
+        # overfit much faster, so they need their own patience/val_ratio).
+        self.val_ratio = val_ratio
+        self.patience = patience
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         random.seed(RANDOM_STATE)
@@ -114,7 +123,16 @@ class LSTMModel:
             dropout=self.dropout,
         ).to(self.device)
 
-    def train(self, X_train, y_train, verbose=True, val_ratio=0.1, patience=10):
+    def train(self, X_train, y_train, verbose=True, val_ratio=None, patience=None):
+        # FIX: fall back to the instance's own val_ratio/patience (set in
+        # __init__) when not explicitly passed here, so callers like
+        # experiments.py can configure early stopping per LSTMModel
+        # instance instead of relying on a single hardcoded default.
+        if val_ratio is None:
+            val_ratio = self.val_ratio
+        if patience is None:
+            patience = self.patience
+
         if self.model is None:
             self._build_model(input_size=X_train.shape[2])
 
