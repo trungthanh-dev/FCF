@@ -143,6 +143,7 @@ def run_lstm_experiment(
         batch_size=128,
         val_ratio=0.1,
         patience=10,
+        loss_delta=1.0,
         per_ship_params=None,
 ):
     """
@@ -173,7 +174,7 @@ def run_lstm_experiment(
         (architecture, scaler, early stopping) changes more often
         during experimentation than the RF baseline.
     hidden_size, num_layers, dropout, learning_rate, epochs, batch_size,
-    val_ratio, patience :
+    val_ratio, patience, loss_delta :
         Default hyperparameters forwarded to LSTMModel(...) for every
         ship/horizon combination, unless overridden per-ship below.
     per_ship_params : dict[str, dict] or None
@@ -206,6 +207,7 @@ def run_lstm_experiment(
         batch_size=batch_size,
         val_ratio=val_ratio,
         patience=patience,
+        loss_delta=loss_delta,
     )
 
     results = []
