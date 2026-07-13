@@ -31,6 +31,7 @@ NON_FEATURE_COLUMNS = ["ship", "index"]
 # recent fuel consumption, which plain sensor features don't provide.
 TARGET_LAG_STEPS = (1, 5)
 TARGET_ROLLING_WINDOWS = (5,)
+TARGET_SLOPE_WINDOW = (5,)
 
 def detect_leakage_features(df):
     leakage = []

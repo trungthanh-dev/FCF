@@ -67,6 +67,8 @@ def add_target_history_features(
         shifted = df[target].shift(1)
         df[f"Fuel_RollingMean{window}"] = shifted.rolling(window).mean()
         df[f"Fuel_RollingStd{window}"] = shifted.rolling(window).std()
+    for window in slope_windows:
+        df[f"Fuel_Slop{window}"] = (df[target].shift(1) - df[target].shift(1+window))/window
     return df
 
 def preprocess(df: pd.DataFrame, add_target_history=True):
