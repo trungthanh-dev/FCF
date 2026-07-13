@@ -33,6 +33,15 @@ TARGET_LAG_STEPS = (1, 5)
 TARGET_ROLLING_WINDOWS = (5,)
 TARGET_SLOPE_WINDOW = (5,)
 
+DIRECTIONAL_KEYWORDS = [
+    "WindDirection10M",
+    "OceanCurrentDirection",
+    "WaveDirection",
+]
+
+SHIP_BEARING_COLUMN = "Ship_Bearing"
+SHIP_BEARING_FALLBACK_COLUMN = "Ship_Heading"
+
 def detect_leakage_features(df):
     leakage = []
     for col in df.columns:

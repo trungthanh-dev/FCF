@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 
 from feature_config import *
 
@@ -72,6 +73,30 @@ def add_target_history_features(
         df[f"Fuel_Slop{window}"] = (df[target].shift(1) - df[target].shift(1+window))/window
     return df
 
+def add_relative_direction_features(
+        df,
+        direction_keywords=DIRECTIONAL_KEYWORDS,
+        bearing_col=SHIP_BEARING_COLUMN,
+        bearing_fallback_col=SHIP_BEARING_FALLBACK_COLUMN,
+):
+    df = df.copy()
+    ref_col = bearing_col if bearing_col in df.columns else bearing_fallback_col
+    if ref_col not in df.columns:
+        return df
+
+    direction_cols = [
+        col for col in df.columns
+        if col != ref_col and any(keyword in col for keyword in direction_keywords)
+    ]
+
+    for col in direction_cols:
+        relative_deg = (df[col] - df[ref_col])%360
+        relative_rad = np.deg2rad(relative_deg)
+        df[f"{col}_sin"] = np.sin(relative_rad)
+        df[f"{col}_cos"] = np.cos(relative_rad)
+        df = df.drop(columns=[col])
+    return df
+
 def preprocess(df: pd.DataFrame, add_target_history=True):
     df = df.copy()
 
@@ -79,6 +104,7 @@ def preprocess(df: pd.DataFrame, add_target_history=True):
     df = remove_empty_columns(df)
     df = remove_drop_features(df)
     df = handle_missing(df)
+    df = add_relative_direction_features(df)
 
     if add_target_history:
         df = add_target_history_features(df)
