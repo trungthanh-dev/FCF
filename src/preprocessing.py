@@ -39,6 +39,7 @@ def add_target_history_features(
     target=TARGET,
     lag_steps=TARGET_LAG_STEPS,
     rolling_windows=TARGET_ROLLING_WINDOWS,
+    slope_windows = TARGET_SLOPE_WINDOW,
 ):
     """
     Add lagged and rolling-window features built from the target itself
