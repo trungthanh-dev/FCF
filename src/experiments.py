@@ -9,7 +9,7 @@ from evalute import evaluate_regression, print_metrics
 from models.random_forest import RandomForestModel
 from models.lstm import LSTMModel
 from window import create_seq2seq_window
-from models.seq2seq_lstm import Seq2SeqLTSMModel
+from models.seq2seq_lstm import Seq2SeqLSTMModel
 from visualization import (
     plot_actual_vs_predicted,
     plot_residuals,
