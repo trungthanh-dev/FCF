@@ -8,6 +8,8 @@ from dataset import split_features_target, time_series_split
 from evalute import evaluate_regression, print_metrics
 from models.random_forest import RandomForestModel
 from models.lstm import LSTMModel
+from window import create_seq2seq_window
+from models.seq2seq_lstm import Seq2SeqLTSMModel
 from visualization import (
     plot_actual_vs_predicted,
     plot_residuals,
@@ -293,5 +295,131 @@ def run_lstm_experiment(
     print(results_df)
 
     plot_horizon_comparison(results_df, save_dir=plot_dir)
+
+    return results_df
+
+
+def run_seq2seq_experiment(
+        cleaned_datasets,
+        window_size,
+        forecast_horizons,
+        results_csv_path,
+        model_dir=None,
+        predictions_dir=None,
+        use_cache=False,
+        hidden_size=128,
+        num_layers=2,
+        dropout=0.1,
+        learning_rate=5e-4,
+        epochs=150,
+        batch_size=128,
+        val_ratio=0.1,
+        patience=10,
+        loss_delta=1.0,
+        per_ship_params=None,
+):
+    """
+    Train and evaluate ONE seq2seq LSTM per ship (not one per horizon).
+    A single encoder-decoder model predicts all of `forecast_horizons`
+    simultaneously for a given ship, so predictions across horizons come
+    from one shared internal state -- unlike run_lstm_experiment(), which
+    trains 4 independent direct-forecast models whose splits/weights
+    never have to agree with each other.
+
+    Mirrors run_lstm_experiment()'s conventions: per-ship hyperparameter
+    overrides via `per_ship_params`, Huber loss, target/feature scaling
+    handled inside Seq2SeqLSTMModel.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ship, horizon, MAE, RMSE, R2 -- one row per (ship, horizon),
+        same shape as run_lstm_experiment()'s output, so results are
+        directly comparable in the same results table / plots.
+    """
+    if model_dir:
+        os.makedirs(model_dir, exist_ok=True)
+    if predictions_dir:
+        os.makedirs(predictions_dir, exist_ok=True)
+
+    per_ship_params = per_ship_params or {}
+    base_params = dict(
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        dropout=dropout,
+        learning_rate=learning_rate,
+        epochs=epochs,
+        batch_size=batch_size,
+        val_ratio=val_ratio,
+        patience=patience,
+        loss_delta=loss_delta,
+    )
+
+    results = []
+
+    for name, df in cleaned_datasets.items():
+        X, y = split_features_target(df)
+
+        ship_params = {**base_params, **per_ship_params.get(name, {})}
+        print(f"\n[Seq2Seq] {name} — hyperparameters: {ship_params}")
+
+        model_path = os.path.join(model_dir, f"{name}_seq2seq.pt") if model_dir else None
+        pred_path = os.path.join(predictions_dir, f"{name}_seq2seq.npz") if predictions_dir else None
+        cache_available = (
+                use_cache
+                and model_path and pred_path
+                and os.path.exists(model_path)
+                and os.path.exists(pred_path)
+        )
+
+        if cache_available:
+            print(f"[Seq2Seq] {name} — loaded from cache, skipping training")
+
+            model = Seq2SeqLSTMModel(horizons=forecast_horizons, **ship_params)
+            model.load(model_path)
+
+            cached = np.load(pred_path)
+            y_test, y_pred = cached["y_test"], cached["y_pred"]
+
+        else:
+            X_window, y_window = create_seq2seq_window(
+                X, y, window_size, forecast_horizons
+            )
+            X_train, X_test, y_train, y_test = time_series_split(
+                X_window, y_window
+            )
+
+            print(f"[Seq2Seq] {name} | horizons={forecast_horizons}")
+            print("X_train:", X_train.shape)
+            print("X_test:", X_test.shape)
+            print("y_train:", y_train.shape)
+            print("y_test:", y_test.shape)
+
+            model = Seq2SeqLSTMModel(horizons=forecast_horizons, **ship_params)
+            model.train(X_train, y_train)
+            y_pred = model.predict(X_test)
+
+            if model_path:
+                model.save(model_path)
+            if pred_path:
+                np.savez(pred_path, y_test=y_test, y_pred=y_pred)
+
+        # y_test / y_pred are (samples, n_horizons); evaluate one column
+        # (= one horizon) at a time, same metric functions as everywhere
+        # else in the pipeline, so results are directly comparable.
+        for col_idx, horizon in enumerate(forecast_horizons):
+            metrics = evaluate_regression(y_test[:, col_idx], y_pred[:, col_idx])
+            print(f"[Seq2Seq] {name} | horizon={horizon}")
+            print_metrics(metrics)
+
+            metrics["ship"] = name
+            metrics["horizon"] = horizon
+            results.append(metrics)
+
+    results_df = pd.DataFrame(results)[["ship", "horizon", "MAE", "RMSE", "R2"]]
+    results_df.to_csv(results_csv_path, index=False)
+
+    print("\n[Seq2Seq] Full results (all ships x all horizons):")
+    print(results_df)
 
     return results_df
