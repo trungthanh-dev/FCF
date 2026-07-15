@@ -61,7 +61,7 @@ def create_seq2seq_window(
             X.iloc[i: i + WINDOW_SIZE].values
         )
         targets = [
-            y.iloc[i : i + WINDOW_SIZE +h -1]
+            y.iloc[i + WINDOW_SIZE + h - 1]
             for h in horizons
         ]
         y_window.append(targets)
