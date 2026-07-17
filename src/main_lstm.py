@@ -5,8 +5,19 @@ from experiments import run_lstm_experiment
 from config import WINDOW_SIZE, FORECAST_HORIZONS
 
 # ---------------------------------------------------------------------------
-# CHỈ chạy LSTM. Không load lại data thô từ HF hub, không chạy lại EDA/RF —
-# dùng thẳng data_clean/*.parquet đã sinh ra từ main.py chạy ở local trước đó.
+# Runs LSTM (direct forecasting: one model per ship per horizon) for all
+# 3 ships. Uses data_clean/*.parquet produced by main.py -- does NOT
+# re-download or re-preprocess raw data.
+#
+# Saves one model file per (ship, horizon) to LSTM_MODEL_DIR, e.g.:
+#   models_saved/lstm/Poseidon_h1.pt
+#   models_saved/lstm/Poseidon_h5.pt
+#   models_saved/lstm/Poseidon_h10.pt
+#   models_saved/lstm/Poseidon_h20.pt
+#   models_saved/lstm/Triton_h1.pt ... etc.
+#
+# These are the files needed by speed_optimization_poseidon.py and
+# anomaly_detection_poseidon.py (model.load(...)).
 # ---------------------------------------------------------------------------
 
 EDA_DIR = "eda_output"
@@ -16,6 +27,7 @@ LSTM_MODEL_DIR = os.path.join("models_saved", "lstm")
 LSTM_PRED_DIR = os.path.join("predictions_cache", "lstm")
 
 os.makedirs(LSTM_PLOT_DIR, exist_ok=True)
+os.makedirs(LSTM_MODEL_DIR, exist_ok=True)
 
 cleaned_datasets = {
     "Poseidon": pd.read_parquet(os.path.join(DATA_DIR, "poseidon_clean.parquet")),
@@ -24,27 +36,11 @@ cleaned_datasets = {
 }
 
 # Triton and Ceto have far fewer samples than Poseidon (~25k and ~43k vs
-# ~105k) and, per the diagnostic run, overfit fast — val_loss starts
-# climbing within a handful of epochs while train_loss keeps dropping.
-# Poseidon keeps the defaults defined in run_lstm_experiment(), since
-# it's already performing well (R2 0.93 -> 0.76 across horizons).
-#
-# Triton: smaller model (hidden_size=32, num_layers=1) + higher patience
-# worked well here (R2 no longer negative at h=10, much less negative at
-# h=20 — see run from 2026-07-13).
-#
-# Ceto: the same small model (32/1) fixed the h=20 negative R2, but made
-# h=5/h=10 WORSE than the previous (128/2) run. Ceto's target is
-# positively skewed with occasional high-fuel-consumption spikes, and its
-# speed-vs-fuel relationship is noisier than Triton's (see weekly report,
-# feature importance slide) — so cutting capacity too far likely removed
-# some of the real signal along with the overfitting capacity. Ceto gets
-# a mid-sized model (64/1) instead of Triton's 32/1.
-#
-# Both Triton and Ceto also switch to Huber loss (loss_delta) instead of
-# MSE: their targets have occasional outlier spikes that, under MSE,
-# produce oversized gradients and destabilize training. Huber caps that
-# influence while staying smooth for small errors.
+# ~105k) and overfit faster, so they get a smaller model and higher
+# patience. Both also use Huber loss (loss_delta) instead of MSE, since
+# their targets have occasional outlier spikes that destabilize training
+# under plain MSE. Poseidon keeps the defaults defined in
+# run_lstm_experiment() (hidden_size=128, num_layers=2, patience=10).
 LSTM_PARAMS_BY_SHIP = {
     "Triton": {
         "hidden_size": 32,
@@ -71,3 +67,6 @@ lstm_results_df = run_lstm_experiment(
     use_cache=False,
     per_ship_params=LSTM_PARAMS_BY_SHIP,
 )
+
+print("\nDone. Models saved to:", LSTM_MODEL_DIR)
+print(lstm_results_df)
