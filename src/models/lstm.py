@@ -260,7 +260,7 @@ class LSTMModel:
         )
 
     def load(self, path):
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
         self.hidden_size = checkpoint["hidden_size"]
         self.num_layers = checkpoint["num_layers"]
