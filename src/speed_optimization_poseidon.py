@@ -36,7 +36,7 @@ if SPEED_COL not in features:
 # Speed search range: only within values actually observed historically,
 # so recommendations stay physically meaningful (no extrapolation beyond
 # what the ship has actually done).
-speed_min = df[SPEED_COL].min()
+speed_min = max(df[SPEED_COL].min(), 1.0)  # loại bỏ 0 và tốc độ quá thấp (đứng yên/neo đậu)
 speed_max = df[SPEED_COL].max()
 candidate_speeds = np.linspace(speed_min, speed_max, N_CANDIDATES)
 
@@ -110,3 +110,4 @@ print(results_df)
 
 os.makedirs("eda_output", exist_ok=True)
 results_df.to_csv("eda_output/speed_optimization_poseidon.csv", index=False)
+print("speed_min:", speed_min, "speed_max:", speed_max)
