@@ -17,6 +17,16 @@ data_clean/
 eda_output/
 models_saved/
 predictions_cache/
+data_clean_power/
+eda_output_power/
+models_saved_power/
+predictions_cache_power/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Node (presentation/ export tool)
+node_modules/
+
+# Reports/slides/notebooks kept local only, not part of the code repo
+presentation/
