@@ -28,12 +28,13 @@ class _Seq2SeqNet(nn.Module):
     have to agree with each other.
     """
 
-    def __init__(self, input_size, hidden_size, num_layers, dropout, n_horizons):
+    def __init__(self, input_size, hidden_size, num_layers, dropout, n_horizons, horizons=None, horizon_aware=False):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.n_horizons = n_horizons
+        self.horizon_aware = horizon_aware
 
         self.encoder = nn.LSTM(
             input_size=input_size,
@@ -43,9 +44,15 @@ class _Seq2SeqNet(nn.Module):
             dropout=dropout if num_layers > 1 else 0.0,
         )
         # Decoder input at each step: the previous step's predicted value
-        # (scalar). Autoregressive, like a standard seq2seq decoder.
+        # (scalar), optionally concatenated with the current step's
+        # normalized horizon (horizon / max(horizons)) so the decoder has
+        # an explicit signal for how large a time gap this step covers --
+        # otherwise step index alone can't distinguish "1 step ahead" from
+        # "20 steps ahead", since every decoder step looks structurally
+        # identical.
+        decoder_input_size = 2 if horizon_aware else 1
         self.decoder = nn.LSTM(
-            input_size=1,
+            input_size=decoder_input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
@@ -62,20 +69,54 @@ class _Seq2SeqNet(nn.Module):
         # an arbitrary constant like 0.
         self.start_token = nn.Parameter(torch.zeros(1, 1, 1))
 
-    def forward(self, x):
+        if horizon_aware:
+            if horizons is None:
+                raise ValueError("horizons must be provided when horizon_aware=True")
+            norm = [h / max(horizons) for h in horizons]
+            self.register_buffer(
+                "horizon_features", torch.tensor(norm, dtype=torch.float32).view(1, n_horizons, 1)
+            )
+
+    def forward(self, x, y_true=None, teacher_forcing_ratio=0.0):
+        """
+        y_true / teacher_forcing_ratio: only used during training. With
+        probability `teacher_forcing_ratio`, the TRUE scaled target for
+        the step just predicted is fed back into the decoder instead of
+        the model's own prediction (per training example, independently
+        sampled per batch call). y_true has shape (batch, n_horizons) in
+        the same scaled units the model outputs. At inference (y_true is
+        None) the decoder is always free-running, since future targets
+        aren't available.
+        """
         batch_size = x.size(0)
         _, (h, c) = self.encoder(x)
 
-        decoder_input = self.start_token.expand(batch_size, 1, 1)
+        prev_pred = self.start_token.expand(batch_size, 1, 1)
         hidden = (h, c)
 
         outputs = []
-        for _ in range(self.n_horizons):
+        for step in range(self.n_horizons):
+            if self.horizon_aware:
+                h_feat = self.horizon_features[:, step, :].expand(batch_size, 1, 1)
+                decoder_input = torch.cat([prev_pred, h_feat], dim=-1)
+            else:
+                decoder_input = prev_pred
+
             out, hidden = self.decoder(decoder_input, hidden)
             out = self.dropout_layer(out.squeeze(1))
             pred = self.output_layer(out)          # (batch, 1)
             outputs.append(pred)
-            decoder_input = pred.unsqueeze(1)       # feed prediction back in
+
+            use_teacher_forcing = (
+                self.training
+                and y_true is not None
+                and teacher_forcing_ratio > 0.0
+                and torch.rand(1).item() < teacher_forcing_ratio
+            )
+            if use_teacher_forcing:
+                prev_pred = y_true[:, step].reshape(batch_size, 1, 1)
+            else:
+                prev_pred = pred.unsqueeze(1)       # feed own prediction back in
 
         return torch.cat(outputs, dim=1)            # (batch, n_horizons)
 
@@ -103,6 +144,10 @@ class Seq2SeqLSTMModel:
             val_ratio=0.1,
             patience=10,
             loss_delta=1.0,
+            weight_decay=1e-5,
+            horizon_aware_decoder=False,
+            teacher_forcing_start=0.0,
+            teacher_forcing_decay_epochs=None,
             device=None,
     ):
         self.horizons = list(horizons)
@@ -116,6 +161,22 @@ class Seq2SeqLSTMModel:
         self.val_ratio = val_ratio
         self.patience = patience
         self.loss_delta = loss_delta
+        # FIX: was hardcoded to 1e-5 inside train()'s optimizer call, so it
+        # could never be tuned per-ship like hidden_size/dropout/patience.
+        self.weight_decay = weight_decay
+        # Optional decoder-input change: feed the normalized target horizon
+        # alongside the previous prediction at each decoder step (see
+        # _Seq2SeqNet.forward). Off by default so existing callers/results
+        # are unaffected.
+        self.horizon_aware_decoder = horizon_aware_decoder
+        # Optional teacher forcing: probability of feeding the TRUE scaled
+        # target (instead of the model's own prediction) into the next
+        # decoder step during training, linearly decayed from
+        # teacher_forcing_start at epoch 0 to 0 by teacher_forcing_decay_epochs
+        # (defaults to self.epochs, i.e. decays across the whole run).
+        # teacher_forcing_start=0.0 (default) disables it entirely.
+        self.teacher_forcing_start = teacher_forcing_start
+        self.teacher_forcing_decay_epochs = teacher_forcing_decay_epochs or epochs
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         random.seed(RANDOM_STATE)
@@ -166,6 +227,8 @@ class Seq2SeqLSTMModel:
             num_layers=self.num_layers,
             dropout=self.dropout,
             n_horizons=self.n_horizons,
+            horizons=self.horizons,
+            horizon_aware=self.horizon_aware_decoder,
         ).to(self.device)
 
     def train(self, X_train, y_train, verbose=True, val_ratio=None, patience=None):
@@ -196,7 +259,7 @@ class Seq2SeqLSTMModel:
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
         criterion = nn.HuberLoss(delta=self.loss_delta)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-5)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=0.5, patience=3,
         )
@@ -206,6 +269,15 @@ class Seq2SeqLSTMModel:
         epochs_no_improve = 0
 
         for epoch in range(self.epochs):
+            # Linear decay: teacher_forcing_start at epoch 0 -> 0 by
+            # teacher_forcing_decay_epochs. Stays 0.0 for every epoch when
+            # teacher_forcing_start=0.0 (the default), matching the old
+            # always-free-running behavior exactly.
+            tf_ratio = max(
+                0.0,
+                self.teacher_forcing_start * (1 - epoch / self.teacher_forcing_decay_epochs),
+            )
+
             self.model.train()
             total_loss = 0.0
             for X_batch, y_batch in loader:
@@ -213,7 +285,7 @@ class Seq2SeqLSTMModel:
                 y_batch = y_batch.to(self.device)
 
                 optimizer.zero_grad()
-                y_pred = self.model(X_batch)          # (batch, n_horizons)
+                y_pred = self.model(X_batch, y_true=y_batch, teacher_forcing_ratio=tf_ratio)  # (batch, n_horizons)
                 loss = criterion(y_pred, y_batch)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
@@ -275,6 +347,12 @@ class Seq2SeqLSTMModel:
                 "horizons": self.horizons,
                 "scaler": self.scaler,
                 "y_scaler": self.y_scaler,
+                # FIX: horizon_aware_decoder changes the decoder's input
+                # size (1 vs 2) -- it's structural, not just a training
+                # hyperparameter, so it must round-trip through
+                # save/load or _build_model() would reconstruct the
+                # wrong architecture and state_dict loading would fail.
+                "horizon_aware_decoder": self.horizon_aware_decoder,
             },
             path,
         )
@@ -293,5 +371,8 @@ class Seq2SeqLSTMModel:
         self.dropout = checkpoint["dropout"]
         self.scaler = checkpoint["scaler"]
         self.y_scaler = checkpoint["y_scaler"]
+        # older checkpoints (saved before this option existed) default to
+        # False, matching their actual architecture.
+        self.horizon_aware_decoder = checkpoint.get("horizon_aware_decoder", False)
         self._build_model(input_size=checkpoint["input_size"])
         self.model.load_state_dict(checkpoint["state_dict"])
