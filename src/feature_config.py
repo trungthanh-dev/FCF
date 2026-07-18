@@ -1,4 +1,4 @@
-TARGET = "Consumer_Total_MomentaryFuel"
+TARGET = "Consumer_Total_ShaftPower"
 LEAKAGE_KEYWORDS = [
     "ShaftPower",
     "ShaftTorque",

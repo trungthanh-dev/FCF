@@ -1,7 +1,27 @@
+import re
+
 import pandas as pd
 import numpy as np
 
 from feature_config import *
+
+def _infer_prefix_from_target(target: str) -> str:
+    """
+    Derive a short, valid column-name prefix from a target column name,
+    e.g. "Consumer_Total_MomentaryFuel" -> "Fuel",
+         "Consumer_Total_ShaftPower" -> "Power".
+
+    Takes the last "_"-separated segment, then the last CamelCase word
+    within it (falls back to the whole segment, sanitized, if it has no
+    CamelCase words).
+    """
+    last_segment = target.split("_")[-1]
+    words = re.findall(r"[A-Z][a-z0-9]*", last_segment)
+    prefix = words[-1] if words else last_segment
+    prefix = re.sub(r"[^0-9a-zA-Z_]", "", prefix)
+    if prefix and prefix[0].isdigit():
+        prefix = f"_{prefix}"
+    return prefix or "Target"
 
 def remove_leakage(df: pd.DataFrame):
     leakage = detect_leakage_features(df)
@@ -41,10 +61,15 @@ def add_target_history_features(
     lag_steps=TARGET_LAG_STEPS,
     rolling_windows=TARGET_ROLLING_WINDOWS,
     slope_windows = TARGET_SLOPE_WINDOW,
+    prefix=None,
 ):
     """
     Add lagged and rolling-window features built from the target itself
-    (e.g. Fuel_Lag1, Fuel_RollingMean5).
+    (e.g. Fuel_Lag1, Fuel_RollingMean5 when target is the fuel column;
+    Power_Lag1, Power_RollingMean5 when target is a shaft-power column).
+
+    The column prefix is derived automatically from `target` (see
+    `_infer_prefix_from_target`) unless `prefix` is passed explicitly.
 
     IMPORTANT — no leakage: every value uses ONLY past rows. Rolling
     windows call .shift(1) BEFORE .rolling(...), so a rolling mean at row
@@ -63,14 +88,15 @@ def add_target_history_features(
     rest of the pipeline.
     """
     df = df.copy()
+    prefix = prefix or _infer_prefix_from_target(target)
     for lag in lag_steps:
-        df[f"Fuel_Lag{lag}"] = df[target].shift(lag)
+        df[f"{prefix}_Lag{lag}"] = df[target].shift(lag)
     for window in rolling_windows:
         shifted = df[target].shift(1)
-        df[f"Fuel_RollingMean{window}"] = shifted.rolling(window).mean()
-        df[f"Fuel_RollingStd{window}"] = shifted.rolling(window).std()
+        df[f"{prefix}_RollingMean{window}"] = shifted.rolling(window).mean()
+        df[f"{prefix}_RollingStd{window}"] = shifted.rolling(window).std()
     for window in slope_windows:
-        df[f"Fuel_Slop{window}"] = (df[target].shift(1) - df[target].shift(1+window))/window
+        df[f"{prefix}_Slop{window}"] = (df[target].shift(1) - df[target].shift(1+window))/window
     return df
 
 def add_relative_direction_features(
