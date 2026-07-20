@@ -158,6 +158,7 @@ class TCNModel:
             patience=10,
             loss_delta=1.0,
             weight_decay=1e-5,
+            adam_eps=1e-4,
             early_stop_metric="huber",
             dtw_window=10,
             dtw_weight=0.5,
@@ -173,6 +174,7 @@ class TCNModel:
         self.patience = patience
         self.loss_delta = loss_delta
         self.weight_decay = weight_decay
+        self.adam_eps = adam_eps
         assert early_stop_metric in ("huber", "dtw", "combined")
         self.early_stop_metric = early_stop_metric
         self.dtw_window = dtw_window
@@ -249,7 +251,19 @@ class TCNModel:
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
         criterion = nn.HuberLoss(delta=self.loss_delta)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        # eps default of 1e-4 (PyTorch's Adam default is 1e-8): with mostly
+        # near-zero gradients -- e.g. delta targets that are ~0 for long
+        # flat stretches -- Adam's per-parameter second-moment estimate can
+        # shrink enough that sqrt(v_hat)+eps is dominated by eps itself; too
+        # small an eps then blows the update up (and, combined with
+        # weight_norm's own division by ||v||, to NaN) the moment a batch
+        # with real signal appears. Verified empirically: eps=1e-8 corrupted
+        # ~12% of batches with non-finite gradients on Poseidon delta-target
+        # training; eps=1e-4 had zero.
+        optimizer = torch.optim.Adam(
+            self.model.parameters(), lr=self.learning_rate,
+            weight_decay=self.weight_decay, eps=self.adam_eps,
+        )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=0.5, patience=3,
         )
@@ -261,6 +275,8 @@ class TCNModel:
         for epoch in range(self.epochs):
             self.model.train()
             total_loss = 0.0
+            n_seen = 0
+            n_skipped = 0
             for X_batch, y_batch in loader:
                 X_batch = X_batch.to(self.device)
                 y_batch = y_batch.to(self.device)
@@ -269,12 +285,28 @@ class TCNModel:
                 y_pred = self.model(X_batch)
                 loss = criterion(y_pred, y_batch)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                # weight_norm's backward divides by ||v|| (the direction
+                # vector's norm); if that norm collapses toward zero the
+                # gradient can blow up to NaN/Inf for a single batch (seen
+                # empirically with delta-target training, where most
+                # batches sit near zero and a few extreme-outlier batches
+                # spike the loss). Stepping on a NaN/Inf gradient would
+                # permanently corrupt every weight for the rest of training
+                # (irreversible, not something clipping can fix after the
+                # fact) -- so skip just that batch's update instead.
+                if not torch.isfinite(grad_norm):
+                    optimizer.zero_grad()
+                    n_skipped += 1
+                    continue
                 optimizer.step()
 
                 total_loss += loss.item() * X_batch.size(0)
+                n_seen += X_batch.size(0)
 
-            train_loss = total_loss / len(dataset)
+            train_loss = total_loss / n_seen if n_seen else float("nan")
+            if verbose and n_skipped:
+                print(f"  ({n_skipped} batch(es) skipped this epoch: non-finite gradient)")
 
             self.model.eval()
             with torch.no_grad():
