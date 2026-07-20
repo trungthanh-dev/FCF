@@ -23,18 +23,21 @@ from visualization import (
 
 def _scale_metrics(metrics, unit_scale):
     """
-    Display-only unit conversion: MAE/RMSE are divided by unit_scale (e.g.
-    1e6 to go from Watts to MW) for printing and for the results table/CSV.
-    R2 is scale-invariant so it's left untouched. The underlying
-    evaluate_regression() call, and every cached .npz prediction, always
-    stays in the model's native (raw) unit -- this only affects what gets
-    printed/reported, never training or the on-disk cache.
+    Display-only unit conversion: MAE/RMSE/DTW are divided by unit_scale (e.g.
+    1e6 to go from Watts to MW) for printing and for the results table/CSV --
+    DTW accumulates raw-unit absolute differences just like MAE/RMSE, so it
+    needs the same conversion to stay comparable. R2 is scale-invariant so
+    it's left untouched. The underlying evaluate_regression() call, and every
+    cached .npz prediction, always stays in the model's native (raw) unit --
+    this only affects what gets printed/reported, never training or the
+    on-disk cache.
     """
     if unit_scale == 1.0:
         return dict(metrics)
     scaled = dict(metrics)
     scaled["MAE"] = metrics["MAE"] / unit_scale
     scaled["RMSE"] = metrics["RMSE"] / unit_scale
+    scaled["DTW"] = metrics["DTW"] / unit_scale
     return scaled
 
 
@@ -138,10 +141,10 @@ def run_random_forest_experiment(
                 top_n=20,
             )
 
-    results_df = pd.DataFrame(results)[["ship", "horizon", "MAE", "RMSE", "R2"]]
+    results_df = pd.DataFrame(results)[["ship", "horizon", "MAE", "RMSE", "R2", "DTW"]]
     results_df.to_csv(results_csv_path, index=False)
 
-    unit_note = f" [MAE/RMSE in {unit_label}]" if unit_label else ""
+    unit_note = f" [MAE/RMSE/DTW in {unit_label}]" if unit_label else ""
     print(f"\nFull results (all ships x all horizons){unit_note}:")
     print(results_df)
 
@@ -165,7 +168,7 @@ def run_xgboost_experiment(
     """
     Mirrors run_random_forest_experiment() exactly (same caching pattern,
     same plot set, same flattened-window input), swapping in XGBoostModel
-    so results land in a directly comparable [ship, horizon, MAE, RMSE, R2]
+    so results land in a directly comparable [ship, horizon, MAE, RMSE, R2, DTW]
     table.
     """
     os.makedirs(plot_dir, exist_ok=True)
@@ -256,10 +259,10 @@ def run_xgboost_experiment(
                 top_n=20,
             )
 
-    results_df = pd.DataFrame(results)[["ship", "horizon", "MAE", "RMSE", "R2"]]
+    results_df = pd.DataFrame(results)[["ship", "horizon", "MAE", "RMSE", "R2", "DTW"]]
     results_df.to_csv(results_csv_path, index=False)
 
-    unit_note = f" [MAE/RMSE in {unit_label}]" if unit_label else ""
+    unit_note = f" [MAE/RMSE/DTW in {unit_label}]" if unit_label else ""
     print(f"\n[XGBoost] Full results (all ships x all horizons){unit_note}:")
     print(results_df)
 
@@ -333,7 +336,7 @@ def run_lstm_experiment(
     Returns
     -------
     pd.DataFrame
-        Columns: ship, horizon, MAE, RMSE, R2 — one row per combination.
+        Columns: ship, horizon, MAE, RMSE, R2, DTW — one row per combination.
     """
     os.makedirs(plot_dir, exist_ok=True)
     if model_dir:
@@ -430,10 +433,10 @@ def run_lstm_experiment(
                 save_path=os.path.join(plot_dir, f"{tag}_trajectory.png"),
             )
 
-    results_df = pd.DataFrame(results)[["ship", "horizon", "MAE", "RMSE", "R2"]]
+    results_df = pd.DataFrame(results)[["ship", "horizon", "MAE", "RMSE", "R2", "DTW"]]
     results_df.to_csv(results_csv_path, index=False)
 
-    unit_note = f" [MAE/RMSE in {unit_label}]" if unit_label else ""
+    unit_note = f" [MAE/RMSE/DTW in {unit_label}]" if unit_label else ""
     print(f"\n[LSTM] Full results (all ships x all horizons){unit_note}:")
     print(results_df)
 
@@ -566,10 +569,10 @@ def run_tcn_experiment(
                 save_path=os.path.join(plot_dir, f"{tag}_trajectory.png"),
             )
 
-    results_df = pd.DataFrame(results)[["ship", "horizon", "MAE", "RMSE", "R2"]]
+    results_df = pd.DataFrame(results)[["ship", "horizon", "MAE", "RMSE", "R2", "DTW"]]
     results_df.to_csv(results_csv_path, index=False)
 
-    unit_note = f" [MAE/RMSE in {unit_label}]" if unit_label else ""
+    unit_note = f" [MAE/RMSE/DTW in {unit_label}]" if unit_label else ""
     print(f"\n[TCN] Full results (all ships x all horizons){unit_note}:")
     print(results_df)
 
@@ -618,7 +621,7 @@ def run_seq2seq_experiment(
     Returns
     -------
     pd.DataFrame
-        Columns: ship, horizon, MAE, RMSE, R2 -- one row per (ship, horizon),
+        Columns: ship, horizon, MAE, RMSE, R2, DTW -- one row per (ship, horizon),
         same shape as run_lstm_experiment()'s output, so results are
         directly comparable in the same results table / plots.
     """
@@ -707,10 +710,10 @@ def run_seq2seq_experiment(
             metrics["horizon"] = horizon
             results.append(metrics)
 
-    results_df = pd.DataFrame(results)[["ship", "horizon", "MAE", "RMSE", "R2"]]
+    results_df = pd.DataFrame(results)[["ship", "horizon", "MAE", "RMSE", "R2", "DTW"]]
     results_df.to_csv(results_csv_path, index=False)
 
-    unit_note = f" [MAE/RMSE in {unit_label}]" if unit_label else ""
+    unit_note = f" [MAE/RMSE/DTW in {unit_label}]" if unit_label else ""
     print(f"\n[Seq2Seq] Full results (all ships x all horizons){unit_note}:")
     print(results_df)
 
