@@ -80,6 +80,41 @@ def create_sliding_window_delta(
         delta_window.append(target - anchor)
     return np.array(X_window), np.array(delta_window), np.array(anchor_window)
 
+def create_seq2seq_window_delta(
+        X: pd.DataFrame,
+        y: pd.Series,
+        WINDOW_SIZE,
+        horizons,
+):
+    """
+    Delta-target counterpart of create_seq2seq_window(): each horizon's
+    target is y(now + h) - y(now) instead of the raw future value, "now"
+    being the last row of the window (same anchor definition as
+    create_sliding_window_delta()). One anchor per sample, shared across
+    all horizon columns, since "now" doesn't depend on which horizon is
+    being predicted.
+
+    Returns
+    -------
+    X_window : (samples, window_size, features)
+    delta_window : (samples, n_horizons)
+    anchor_window : (samples,)
+    """
+    max_h = max(horizons)
+    X_window = []
+    delta_window = []
+    anchor_window = []
+    for i in range(len(X) - WINDOW_SIZE - max_h + 1):
+        anchor = y.iloc[i + WINDOW_SIZE - 1]
+        deltas = [
+            y.iloc[i + WINDOW_SIZE + h - 1] - anchor
+            for h in horizons
+        ]
+        X_window.append(X.iloc[i: i + WINDOW_SIZE].values)
+        anchor_window.append(anchor)
+        delta_window.append(deltas)
+    return np.array(X_window), np.array(delta_window), np.array(anchor_window)
+
 def reshape_for_random_forest(X: np.ndarray):
     """
     Reshape 3D sliding-window data into 2D for Random Forest.

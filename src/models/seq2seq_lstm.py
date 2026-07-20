@@ -148,6 +148,7 @@ class Seq2SeqLSTMModel:
             horizon_aware_decoder=False,
             teacher_forcing_start=0.0,
             teacher_forcing_decay_epochs=None,
+            adam_eps=1e-4,
             device=None,
     ):
         self.horizons = list(horizons)
@@ -177,6 +178,11 @@ class Seq2SeqLSTMModel:
         # teacher_forcing_start=0.0 (default) disables it entirely.
         self.teacher_forcing_start = teacher_forcing_start
         self.teacher_forcing_decay_epochs = teacher_forcing_decay_epochs or epochs
+        # See models/lstm.py / models/tcn.py: default of 1e-4 (PyTorch's
+        # Adam default is 1e-8) avoids Adam's update blowing up to NaN when
+        # most gradients are persistently tiny, as with delta targets that
+        # sit at ~0 for long stretches.
+        self.adam_eps = adam_eps
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         random.seed(RANDOM_STATE)
@@ -259,7 +265,10 @@ class Seq2SeqLSTMModel:
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
         criterion = nn.HuberLoss(delta=self.loss_delta)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        optimizer = torch.optim.Adam(
+            self.model.parameters(), lr=self.learning_rate,
+            weight_decay=self.weight_decay, eps=self.adam_eps,
+        )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=0.5, patience=3,
         )
@@ -280,6 +289,7 @@ class Seq2SeqLSTMModel:
 
             self.model.train()
             total_loss = 0.0
+            n_seen = 0
             for X_batch, y_batch in loader:
                 X_batch = X_batch.to(self.device)
                 y_batch = y_batch.to(self.device)
@@ -288,12 +298,17 @@ class Seq2SeqLSTMModel:
                 y_pred = self.model(X_batch, y_true=y_batch, teacher_forcing_ratio=tf_ratio)  # (batch, n_horizons)
                 loss = criterion(y_pred, y_batch)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                # Defense in depth alongside adam_eps -- see models/tcn.py.
+                if not torch.isfinite(grad_norm):
+                    optimizer.zero_grad()
+                    continue
                 optimizer.step()
 
                 total_loss += loss.item() * X_batch.size(0)
+                n_seen += X_batch.size(0)
 
-            train_loss = total_loss / len(dataset)
+            train_loss = total_loss / n_seen if n_seen else float("nan")
 
             self.model.eval()
             with torch.no_grad():

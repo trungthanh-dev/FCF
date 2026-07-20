@@ -56,6 +56,7 @@ class LSTMModel:
             val_ratio=0.1,
             patience=10,
             loss_delta=1.0,
+            adam_eps=1e-4,
             device=None,
     ):
         self.hidden_size = hidden_size
@@ -64,6 +65,16 @@ class LSTMModel:
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.batch_size = batch_size
+        # Default of 1e-4 (PyTorch's Adam default is 1e-8): with delta
+        # targets that sit at ~0 for long stretches, many parameters see
+        # persistently tiny gradients, and Adam's denominator
+        # (sqrt(v_hat)+eps) can end up dominated by eps itself -- too
+        # small an eps then produces a wildly oversized update the moment
+        # a batch with real signal appears, diverging to NaN (verified
+        # empirically on TCN with the same delta-target data; see
+        # models/tcn.py). Kept configurable in case a future caller wants
+        # PyTorch's default back for raw-target training.
+        self.adam_eps = adam_eps
         # FIX: delta for Huber loss (nn.HuberLoss). Ships like Ceto have
         # occasional high-fuel-consumption spikes (positively skewed
         # target) — under MSE, those few outlier samples produce very
@@ -171,7 +182,10 @@ class LSTMModel:
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
         criterion = nn.HuberLoss(delta=self.loss_delta)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=1e-5)
+        optimizer = torch.optim.Adam(
+            self.model.parameters(), lr=self.learning_rate,
+            weight_decay=1e-5, eps=self.adam_eps,
+        )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode="min",
@@ -185,6 +199,7 @@ class LSTMModel:
         for epoch in range(self.epochs):
             self.model.train()
             total_loss = 0.0
+            n_seen = 0
             for X_batch, y_batch in loader:
                 X_batch = X_batch.to(self.device)
                 y_batch = y_batch.to(self.device)
@@ -193,15 +208,23 @@ class LSTMModel:
                 y_pred = self.model(X_batch)
                 loss = criterion(y_pred, y_batch)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(
+                grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
                     max_norm=1.0
                 )
+                # Defense in depth alongside adam_eps: skip (don't step on)
+                # any batch whose gradient norm is non-finite instead of
+                # permanently corrupting every weight for the rest of
+                # training (see models/tcn.py for the full failure mode).
+                if not torch.isfinite(grad_norm):
+                    optimizer.zero_grad()
+                    continue
                 optimizer.step()
 
                 total_loss += loss.item() * X_batch.size(0)
+                n_seen += X_batch.size(0)
 
-            train_loss = total_loss / len(dataset)
+            train_loss = total_loss / n_seen if n_seen else float("nan")
 
             # --- validation loss, để biết có đang overfit không ---
             self.model.eval()
