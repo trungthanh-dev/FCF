@@ -160,6 +160,7 @@ class TCNModel:
             weight_decay=1e-5,
             early_stop_metric="huber",
             dtw_window=10,
+            dtw_weight=0.5,
             device=None,
     ):
         self.num_channels = list(num_channels)
@@ -172,9 +173,10 @@ class TCNModel:
         self.patience = patience
         self.loss_delta = loss_delta
         self.weight_decay = weight_decay
-        assert early_stop_metric in ("huber", "dtw")
+        assert early_stop_metric in ("huber", "dtw", "combined")
         self.early_stop_metric = early_stop_metric
         self.dtw_window = dtw_window
+        self.dtw_weight = dtw_weight
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         random.seed(RANDOM_STATE)
@@ -280,21 +282,29 @@ class TCNModel:
                 val_loss = criterion(val_pred, y_val_tensor).item()
             scheduler.step(val_loss)
 
-            if self.early_stop_metric == "dtw":
+            if self.early_stop_metric in ("dtw", "combined"):
                 # Val split is the last val_ratio slice of X_train, kept in
                 # chronological order (no shuffling), so DTW over it is a
                 # legitimate sequence comparison -- same as the eval-time
                 # DTW computed on y_test/y_pred, just on the validation
                 # window instead. Huber loss above still drives the LR
-                # scheduler; only checkpoint selection swaps to DTW.
+                # scheduler; only checkpoint selection swaps metric.
                 val_pred_raw = self._y_inverse_transform(val_pred.cpu().numpy())
                 y_val_raw = self._y_inverse_transform(y_val_tensor.cpu().numpy())
-                select_metric = dtw_distance(y_val_raw, val_pred_raw, window=self.dtw_window)
+                val_dtw = dtw_distance(y_val_raw, val_pred_raw, window=self.dtw_window)
+
+                if self.early_stop_metric == "dtw":
+                    select_metric = val_dtw
+                    metric_note = f"  val_dtw: {val_dtw:.6f}"
+                else:
+                    val_mae = float(np.mean(np.abs(y_val_raw - val_pred_raw)))
+                    select_metric = (1 - self.dtw_weight) * val_mae + self.dtw_weight * val_dtw
+                    metric_note = f"  val_mae: {val_mae:.6f}  val_dtw: {val_dtw:.6f}  val_combined: {select_metric:.6f}"
             else:
                 select_metric = val_loss
+                metric_note = ""
 
             if verbose:
-                metric_note = f"  val_dtw: {select_metric:.6f}" if self.early_stop_metric == "dtw" else ""
                 print(f"Epoch {epoch + 1}/{self.epochs} - "
                       f"train_loss: {train_loss:.6f}  val_loss: {val_loss:.6f}{metric_note}")
 
