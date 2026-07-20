@@ -10,6 +10,7 @@ from sklearn.preprocessing import StandardScaler
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import RANDOM_STATE
+from evalute import dtw_distance
 
 
 class _Chomp1d(nn.Module):
@@ -157,6 +158,8 @@ class TCNModel:
             patience=10,
             loss_delta=1.0,
             weight_decay=1e-5,
+            early_stop_metric="huber",
+            dtw_window=10,
             device=None,
     ):
         self.num_channels = list(num_channels)
@@ -169,6 +172,9 @@ class TCNModel:
         self.patience = patience
         self.loss_delta = loss_delta
         self.weight_decay = weight_decay
+        assert early_stop_metric in ("huber", "dtw")
+        self.early_stop_metric = early_stop_metric
+        self.dtw_window = dtw_window
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         random.seed(RANDOM_STATE)
@@ -274,12 +280,26 @@ class TCNModel:
                 val_loss = criterion(val_pred, y_val_tensor).item()
             scheduler.step(val_loss)
 
-            if verbose:
-                print(f"Epoch {epoch + 1}/{self.epochs} - "
-                      f"train_loss: {train_loss:.6f}  val_loss: {val_loss:.6f}")
+            if self.early_stop_metric == "dtw":
+                # Val split is the last val_ratio slice of X_train, kept in
+                # chronological order (no shuffling), so DTW over it is a
+                # legitimate sequence comparison -- same as the eval-time
+                # DTW computed on y_test/y_pred, just on the validation
+                # window instead. Huber loss above still drives the LR
+                # scheduler; only checkpoint selection swaps to DTW.
+                val_pred_raw = self._y_inverse_transform(val_pred.cpu().numpy())
+                y_val_raw = self._y_inverse_transform(y_val_tensor.cpu().numpy())
+                select_metric = dtw_distance(y_val_raw, val_pred_raw, window=self.dtw_window)
+            else:
+                select_metric = val_loss
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            if verbose:
+                metric_note = f"  val_dtw: {select_metric:.6f}" if self.early_stop_metric == "dtw" else ""
+                print(f"Epoch {epoch + 1}/{self.epochs} - "
+                      f"train_loss: {train_loss:.6f}  val_loss: {val_loss:.6f}{metric_note}")
+
+            if select_metric < best_val_loss:
+                best_val_loss = select_metric
                 best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
                 epochs_no_improve = 0
             else:
