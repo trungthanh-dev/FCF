@@ -46,7 +46,11 @@ os.makedirs(PRED_DIR, exist_ok=True)
 
 UNIT_SCALE = 1e6
 UNIT_LABEL = "MW"
-FORECAST_HORIZONS = [5, 10]
+# h=5/h=10 already confirmed the delta target wins across MAE/RMSE/R2/DTW
+# simultaneously (unlike the DTW/combined checkpoint-selection variants,
+# which were a wash) -- h=1 and h=20 fill out the full 4-horizon picture
+# before deciding whether to roll this out to other ships/models.
+FORECAST_HORIZONS = [1, 5, 10, 20]
 
 df = pd.read_parquet(os.path.join(DATA_DIR, "poseidon_clean.parquet"))
 X, y = split_features_target(df)
