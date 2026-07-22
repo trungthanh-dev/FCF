@@ -12,6 +12,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import RANDOM_STATE
 from evalute import dtw_distance
 
+# Must be set before any CUDA context is created (cuBLAS reads it at init) --
+# required for torch.use_deterministic_algorithms(True) to cover matmul/linear
+# ops on CUDA instead of raising RuntimeError. Harmless on CPU-only runs.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 
 class _Chomp1d(nn.Module):
     """
@@ -187,6 +192,20 @@ class TCNModel:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(RANDOM_STATE)
             torch.cuda.manual_seed_all(RANDOM_STATE)
+            # cuDNN can pick nondeterministic conv algorithms (and
+            # autotune/"benchmark" picks a different one run-to-run) -- this
+            # is the likely cause of two independent Optuna searches over
+            # identical TCN hyperparameters landing on wildly different
+            # validation scores (h10 swung from -10.6% to -1.1% vs default,
+            # h20 flipped sign entirely between runs). Forcing deterministic
+            # cuDNN removes that noise so search results become trustworthy.
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+        # warn_only=True: fall back to nondeterministic behavior (with a
+        # warning) for any op with no deterministic GPU implementation,
+        # rather than hard-crashing training -- we want determinism where
+        # PyTorch can give it, not an outage where it can't.
+        torch.use_deterministic_algorithms(True, warn_only=True)
 
         self.model = None
         self.scaler = StandardScaler()
