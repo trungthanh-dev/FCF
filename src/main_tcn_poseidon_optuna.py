@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import optuna
 
-from config import WINDOW_SIZE, TEST_SIZE
+from config import WINDOW_SIZE, TEST_SIZE, RANDOM_STATE
 from dataset import split_features_target
 from window import create_sliding_window_delta
 from evalute import evaluate_regression, print_metrics
@@ -31,6 +31,23 @@ from visualization import plot_actual_vs_predicted, plot_residuals, plot_traject
 # the search affordable; the winning config per horizon is retrained at full
 # budget before evaluating on the held-out test set, mirroring
 # main_tcn_poseidon_delta.py's evaluation shape so results are comparable.
+#
+# Noise-robust rework (2026-07-23): two independent runs of this script over
+# an IDENTICAL search space picked different "best" hyperparameters and got
+# different final-retrain quality out of them (h10 "win" shrank from -10.6%
+# to -1.1%, h20 flipped sign entirely) -- see CLAUDE.md. Even with the
+# cuDNN-determinism fix (models/tcn.py), a single training run is not a
+# trustworthy signal for a config's quality: this is the standard "noisy
+# black-box optimization" problem, and the standard fix is not a bigger
+# search, it's a noise-robust objective. Every objective evaluation now
+# trains N_SEEDS models (same config, different seed) and returns the MEAN
+# val MAE across seeds; the winning config's final retrain is likewise an
+# N_SEEDS-model ensemble (average of raw-unit test predictions) rather than
+# a single retrain, since a single retrain reproducing a search run's
+# quality is exactly what failed last time (h20's winning trial: ~1.78MW
+# val MAE during search vs. a near-untrained checkpoint on retrain).
+# N_TRIALS is cut from 25 to keep total search compute roughly unchanged
+# (N_TRIALS * N_SEEDS ~= the old N_TRIALS * 1).
 # ---------------------------------------------------------------------------
 
 EDA_DIR = "eda_output_power"
@@ -49,11 +66,30 @@ UNIT_SCALE = 1e6
 UNIT_LABEL = "MW"
 FORECAST_HORIZONS = [1, 5, 10, 20]
 VAL_RATIO = 0.1
-N_TRIALS = 25       # per horizon -- raise if Colab time budget allows
+N_TRIALS = 8        # per horizon -- N_TRIALS * N_SEEDS ~= old N_TRIALS * 1
+N_SEEDS = 3         # models trained per config (search AND final ensemble)
 SEARCH_EPOCHS = 60  # smaller budget while searching trials
 SEARCH_PATIENCE = 6
 FINAL_EPOCHS = 150  # TCNModel default, used only for the winning config
 FINAL_PATIENCE = 10
+
+
+def _train_seed(params, seed, X_train, delta_train, epochs, patience):
+    model = TCNModel(
+        num_channels=[params["width"]] * params["depth"],
+        kernel_size=params["kernel_size"],
+        dropout=params["dropout"],
+        learning_rate=params["learning_rate"],
+        weight_decay=params["weight_decay"],
+        batch_size=params["batch_size"],
+        epochs=epochs,
+        patience=patience,
+        val_ratio=VAL_RATIO,
+        seed=seed,
+    )
+    model.train(X_train, delta_train, verbose=False)
+    return model
+
 
 df = pd.read_parquet(os.path.join(DATA_DIR, "poseidon_clean.parquet"))
 X, y = split_features_target(df)
@@ -83,58 +119,74 @@ for horizon in FORECAST_HORIZONS:
 
     def objective(trial, X_train=X_train, delta_train=delta_train,
                   X_val=X_val, anchor_val=anchor_val, y_val_raw=y_val_raw):
-        depth = trial.suggest_int("depth", 3, 6)
-        width = trial.suggest_categorical("width", [16, 32, 64, 128])
-        kernel_size = trial.suggest_categorical("kernel_size", [2, 3, 5, 7])
-        dropout = trial.suggest_float("dropout", 0.0, 0.4)
-        learning_rate = trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True)
-        weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
-        batch_size = trial.suggest_categorical("batch_size", [64, 128, 256])
-
-        model = TCNModel(
-            num_channels=[width] * depth,
-            kernel_size=kernel_size,
-            dropout=dropout,
-            learning_rate=learning_rate,
-            weight_decay=weight_decay,
-            batch_size=batch_size,
-            epochs=SEARCH_EPOCHS,
-            patience=SEARCH_PATIENCE,
-            val_ratio=VAL_RATIO,
+        params = dict(
+            depth=trial.suggest_int("depth", 3, 6),
+            width=trial.suggest_categorical("width", [16, 32, 64, 128]),
+            kernel_size=trial.suggest_categorical("kernel_size", [2, 3, 5, 7]),
+            dropout=trial.suggest_float("dropout", 0.0, 0.4),
+            learning_rate=trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True),
+            weight_decay=trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
+            batch_size=trial.suggest_categorical("batch_size", [64, 128, 256]),
         )
-        model.train(X_train, delta_train, verbose=False)
 
-        delta_val_pred = model.predict(X_val)
-        y_val_pred_raw = anchor_val + delta_val_pred
-        return float(np.mean(np.abs(y_val_raw - y_val_pred_raw)))
+        # Train N_SEEDS models for this config and score on the MEAN val MAE
+        # across seeds, not a single run -- a single run is exactly what
+        # produced two contradictory Optuna studies previously (see header
+        # comment). seed_maes/std are stashed as user_attrs so a "winning"
+        # config that's actually high-variance (unstable across seeds) is
+        # visible in BEST_PARAMS_CSV, not hidden behind a single mean number.
+        seed_maes = []
+        for i in range(N_SEEDS):
+            model = _train_seed(params, RANDOM_STATE + i, X_train, delta_train,
+                                 SEARCH_EPOCHS, SEARCH_PATIENCE)
+            delta_val_pred = model.predict(X_val)
+            y_val_pred_raw = anchor_val + delta_val_pred
+            seed_maes.append(float(np.mean(np.abs(y_val_raw - y_val_pred_raw))))
+
+        trial.set_user_attr("seed_maes", seed_maes)
+        trial.set_user_attr("seed_mae_std", float(np.std(seed_maes)))
+        return float(np.mean(seed_maes))
 
     study = optuna.create_study(direction="minimize", study_name=tag)
     study.optimize(objective, n_trials=N_TRIALS)
 
-    print(f"\n[Optuna] Best val MAE (raw units): {study.best_value:.4f}")
-    print(f"[Optuna] Best params: {study.best_params}")
+    best_trial = study.best_trial
+    print(f"\n[Optuna] Best mean val MAE across {N_SEEDS} seeds (raw units): {best_trial.value:.4f}")
+    print(f"[Optuna] Best params: {best_trial.params}")
+    print(f"[Optuna] Per-seed val MAE: {best_trial.user_attrs.get('seed_maes')} "
+          f"(std: {best_trial.user_attrs.get('seed_mae_std'):.4f})")
 
-    best = study.best_params
-    best_params_records.append({"horizon": horizon, "best_val_mae": study.best_value, **best})
+    best = best_trial.params
+    best_params_records.append({
+        "horizon": horizon,
+        "best_val_mae": best_trial.value,
+        "best_val_mae_std": best_trial.user_attrs.get("seed_mae_std"),
+        **best,
+    })
 
-    final_model = TCNModel(
-        num_channels=[best["width"]] * best["depth"],
-        kernel_size=best["kernel_size"],
-        dropout=best["dropout"],
-        learning_rate=best["learning_rate"],
-        weight_decay=best["weight_decay"],
-        batch_size=best["batch_size"],
-        epochs=FINAL_EPOCHS,
-        patience=FINAL_PATIENCE,
-        val_ratio=VAL_RATIO,
-    )
-    final_model.train(X_train, delta_train)
-    delta_pred = final_model.predict(X_test)
-
+    # Final evaluation is an N_SEEDS-model ensemble (average of raw-unit test
+    # predictions), not a single retrain -- a single retrain of the winning
+    # config is exactly what silently failed to reproduce search-time
+    # quality before (h20: ~1.78MW val MAE during search vs. a near-untrained
+    # checkpoint on retrain). Averaging predictions also gives a lower-
+    # variance final result than any single seed, independent of whether
+    # that instability is fully gone.
     y_test_raw = anchor_test + delta_test
+    seed_test_preds = []
+    seed_test_maes = []
+    for i in range(N_SEEDS):
+        seed = RANDOM_STATE + i
+        seed_model = _train_seed(best, seed, X_train, delta_train, FINAL_EPOCHS, FINAL_PATIENCE)
+        seed_delta_pred = seed_model.predict(X_test)
+        seed_test_preds.append(seed_delta_pred)
+        seed_test_maes.append(float(np.mean(np.abs(delta_test - seed_delta_pred))))
+        seed_model.save(os.path.join(MODEL_DIR, f"{tag}_seed{i}.pt"))
+
+    print(f"[Optuna] Final-retrain per-seed test delta-MAE: {seed_test_maes}")
+
+    delta_pred = np.mean(seed_test_preds, axis=0)
     y_pred_raw = anchor_test + delta_pred
 
-    final_model.save(os.path.join(MODEL_DIR, f"{tag}.pt"))
     np.savez(os.path.join(PRED_DIR, f"{tag}.npz"), y_test=y_test_raw, y_pred=y_pred_raw)
 
     metrics = _scale_metrics(evaluate_regression(y_test_raw, y_pred_raw), UNIT_SCALE)

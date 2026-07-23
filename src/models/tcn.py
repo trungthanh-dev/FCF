@@ -168,6 +168,7 @@ class TCNModel:
             dtw_window=10,
             dtw_weight=0.5,
             device=None,
+            seed=None,
     ):
         self.num_channels = list(num_channels)
         self.kernel_size = kernel_size
@@ -186,12 +187,17 @@ class TCNModel:
         self.dtw_weight = dtw_weight
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        random.seed(RANDOM_STATE)
-        np.random.seed(RANDOM_STATE)
-        torch.manual_seed(RANDOM_STATE)
+        # Overridable so callers can train the same config under several
+        # seeds (e.g. multi-seed Optuna objectives / final-retrain
+        # ensembles) to average away run-to-run noise instead of trusting a
+        # single training run -- see main_tcn_poseidon_optuna.py.
+        self.seed = seed if seed is not None else RANDOM_STATE
+        random.seed(self.seed)
+        np.random.seed(self.seed)
+        torch.manual_seed(self.seed)
         if torch.cuda.is_available():
-            torch.cuda.manual_seed(RANDOM_STATE)
-            torch.cuda.manual_seed_all(RANDOM_STATE)
+            torch.cuda.manual_seed(self.seed)
+            torch.cuda.manual_seed_all(self.seed)
             # cuDNN can pick nondeterministic conv algorithms (and
             # autotune/"benchmark" picks a different one run-to-run) -- this
             # is the likely cause of two independent Optuna searches over
